@@ -1,0 +1,16 @@
+[package]
+name = "tokio-ubus"
+version = "0.1.0"
+edition = "2024"
+description = "Async OpenWrt ubus object provider for tokio, in pure Rust"
+license = "MPL-2.0"
+keywords = ["openwrt", "ubus", "tokio", "ipc"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+log = "0.4"
+thiserror = "2.0"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }

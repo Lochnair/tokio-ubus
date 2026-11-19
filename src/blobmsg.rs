@@ -61,6 +61,8 @@ pub enum Value {
     Int64(i64),
     Double(f64),
     String(BlobString),
+    /// Array elements are written without names. Names on received
+    /// elements are dropped, as JSON conversion drops them too.
     Array(Vec<Value>),
     Table(Table),
 }
@@ -144,14 +146,14 @@ impl Value {
         }
     }
 
-    pub(crate) fn encode(&self, w: &mut Writer, name: &str) {
+    pub(crate) fn encode(&self, w: &mut Writer, name: &[u8]) {
         let Ok(name_len) = u16::try_from(name.len()) else {
             w.set_overflowed();
             return;
         };
         let offset = w.start(self.type_id(), true);
         w.extend(&name_len.to_be_bytes());
-        w.extend(name.as_bytes());
+        w.extend(name);
         w.extend(&[0]);
         w.align();
         match self {
@@ -168,7 +170,7 @@ impl Value {
             }
             Value::Array(items) => {
                 for item in items {
-                    item.encode(w, "");
+                    item.encode(w, b"");
                 }
             }
             Value::Table(table) => table.encode_contents(w),
@@ -178,7 +180,7 @@ impl Value {
 
     /// Decodes one blobmsg attribute into its name and value. `depth` counts
     /// the arrays and tables it sits in.
-    fn decode(attr: Attr<'_>, depth: usize) -> Result<(&str, Value), DecodeError> {
+    fn decode(attr: Attr<'_>, depth: usize) -> Result<(&[u8], Value), DecodeError> {
         if !attr.extended {
             return Err(DecodeError("blobmsg attribute without a name header"));
         }
@@ -193,8 +195,8 @@ impl Value {
         if data.len() < header_len || data[2 + name_len] != 0 {
             return Err(DecodeError("truncated blobmsg name"));
         }
-        let name = std::str::from_utf8(&data[2..2 + name_len])
-            .map_err(|_| DecodeError("blobmsg name is not UTF-8"))?;
+        // Like libubox, any bytes will do for a name.
+        let name = &data[2..2 + name_len];
         let payload = &data[header_len..];
         let fixed = |len: usize| -> Result<&[u8], DecodeError> {
             if payload.len() == len {
@@ -311,6 +313,25 @@ impl fmt::Debug for BlobString {
     }
 }
 
+impl AsRef<[u8]> for BlobString {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Compares every byte, so `"a\0b"` is not equal to `"a"`.
+impl PartialEq<str> for BlobString {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other.as_bytes()
+    }
+}
+
+impl PartialEq<&str> for BlobString {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == other.as_bytes()
+    }
+}
+
 impl From<&str> for BlobString {
     fn from(v: &str) -> Self {
         Self(v.into())
@@ -343,9 +364,10 @@ impl<T: Into<Value>> From<Option<T>> for Value {
 
 /// An ordered blobmsg table: the arguments of a call or its reply.
 /// Duplicate names are kept, as blobmsg allows them; [`Table::get`] returns
-/// the first.
+/// the first. Names are [`BlobString`]s, since libubox does not require
+/// them to be UTF-8 either.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Table(Vec<(String, Value)>);
+pub struct Table(Vec<(BlobString, Value)>);
 
 impl Table {
     pub fn new() -> Self {
@@ -353,21 +375,26 @@ impl Table {
     }
 
     /// Appends an entry, builder style.
-    pub fn with(mut self, name: impl Into<String>, value: impl Into<Value>) -> Self {
+    pub fn with(mut self, name: impl Into<BlobString>, value: impl Into<Value>) -> Self {
         self.push(name, value);
         self
     }
 
-    pub fn push(&mut self, name: impl Into<String>, value: impl Into<Value>) {
+    pub fn push(&mut self, name: impl Into<BlobString>, value: impl Into<Value>) {
         self.0.push((name.into(), value.into()));
     }
 
-    pub fn get(&self, name: &str) -> Option<&Value> {
-        self.0.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    /// The first entry whose name has exactly these bytes.
+    pub fn get(&self, name: impl AsRef<[u8]>) -> Option<&Value> {
+        let name = name.as_ref();
+        self.0
+            .iter()
+            .find(|(n, _)| n.as_bytes() == name)
+            .map(|(_, v)| v)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
-        self.0.iter().map(|(n, v)| (n.as_str(), v))
+    pub fn iter(&self) -> impl Iterator<Item = (&BlobString, &Value)> {
+        self.0.iter().map(|(n, v)| (n, v))
     }
 
     pub fn len(&self) -> usize {
@@ -382,7 +409,7 @@ impl Table {
     /// payload of `UBUS_ATTR_DATA` carries them.
     pub(crate) fn encode_contents(&self, w: &mut Writer) {
         for (name, value) in &self.0 {
-            value.encode(w, name);
+            value.encode(w, name.as_bytes());
         }
     }
 
@@ -395,14 +422,14 @@ impl Table {
         blob::iter(bytes)
             .map(|attr| {
                 let (name, value) = Value::decode(attr?, depth)?;
-                Ok((name.to_owned(), value))
+                Ok((BlobString::from(name), value))
             })
             .collect::<Result<_, _>>()
             .map(Table)
     }
 }
 
-impl<K: Into<String>, V: Into<Value>> FromIterator<(K, V)> for Table {
+impl<K: Into<BlobString>, V: Into<Value>> FromIterator<(K, V)> for Table {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         Table(
             iter.into_iter()
@@ -413,8 +440,8 @@ impl<K: Into<String>, V: Into<Value>> FromIterator<(K, V)> for Table {
 }
 
 impl IntoIterator for Table {
-    type Item = (String, Value);
-    type IntoIter = std::vec::IntoIter<(String, Value)>;
+    type Item = (BlobString, Value);
+    type IntoIter = std::vec::IntoIter<(BlobString, Value)>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
@@ -512,6 +539,14 @@ mod tests {
         let value = table.get("a").unwrap();
         assert_eq!(value.as_string().unwrap().as_bytes(), b"x\xff");
         assert_eq!(value.as_str(), None, "not UTF-8");
+        assert_eq!(encode(&table), bytes);
+    }
+
+    #[test]
+    fn non_utf8_names_are_kept() {
+        let bytes = [0x85, 0, 0, 12, 0, 1, 0xe9, 0, 0, 0, 0, 1];
+        let table = Table::decode(&bytes).unwrap();
+        assert_eq!(table.get([0xe9]), Some(&Value::Int32(1)));
         assert_eq!(encode(&table), bytes);
     }
 

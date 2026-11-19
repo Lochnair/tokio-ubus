@@ -31,6 +31,19 @@ target/debug/examples/demo "$sock" 2>/tmp/demo.log & demo_pid=$!
 trap 'kill $demo_pid $ubusd_pid 2>/dev/null || true' EXIT
 u -t 5 wait_for demo demo.second
 
+differential() (
+    cc -std=gnu11 -Wall -Wextra -Werror tests/ubusd/differential.c -o /tmp/ubus-differential -lubus -lubox || exit
+    /tmp/ubus-differential "$sock" & oracle_pid=$!
+    trap 'kill "$oracle_pid" 2>/dev/null || true' EXIT
+    u -t 5 wait_for parity.c || exit
+    /tmp/ubus-differential "$sock" "${UBUS_DIFFERENTIAL_CASES:-512}"
+)
+if out=$(differential 2>&1); then
+    pass "libubus differential echo ($out)"
+else
+    fail "libubus differential echo: $out"
+fi
+
 out=$(u -v list demo 2>&1)
 case $out in
     *'"echo":{"message":"String","count":"Integer"}'*'"sleep":{"ms":"Integer"}'*) pass "signature lists methods and argument types" ;;

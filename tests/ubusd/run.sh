@@ -1,7 +1,7 @@
 #!/bin/sh
 # Runs examples/demo against upstream ubusd in a container and checks it with
-# the ubus CLI. Usage: tests/ubusd/run.sh [master|24.10|25.12] (default
-# master), from anywhere, with Docker.
+# the ubus CLI and a C libubus peer. Usage: tests/ubusd/run.sh
+# [master|24.10|25.12] (default master), from anywhere, with Docker.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
@@ -16,6 +16,7 @@ image=tokio-ubus-ubusd:${1:-master}
 # shellcheck disable=SC2086
 docker build -q $revs -t "$image" "$here" >/dev/null
 exec docker run --rm \
+    -e UBUS_DIFFERENTIAL_CASES \
     -v "$root:/work" \
     -v tokio-ubus-target:/work/target \
     -v tokio-ubus-cargo:/usr/local/cargo/registry \

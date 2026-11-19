@@ -316,12 +316,14 @@ impl<'a> Session<'a> {
             (Some(0), Some(id)) => {
                 self.by_id.insert(id, pending.object);
             }
-            (Some(0), None) => {
-                return Err(Error::Protocol("ADD_OBJECT succeeded without an object id"));
-            }
-            // Like libubus, a refused object does not stop the others.
+            // Like libubus, a refused object does not stop the others, and
+            // success without an id fails the object as ubus_add_object does.
             (status, _) => {
-                let status = Status(status.unwrap_or(Status::UNKNOWN_ERROR.0));
+                let status = match status {
+                    Some(0) => Status::NO_DATA,
+                    Some(status) => Status(status),
+                    None => Status::UNKNOWN_ERROR,
+                };
                 error!("Registering ubus object {:?} failed: {status}", object.name);
                 self.refused = true;
             }
@@ -348,6 +350,7 @@ impl<'a> Session<'a> {
         let Some(method_name) = attrs.method else {
             return send_unless(no_reply, wr, refuse(Status::INVALID_ARGUMENT)).await;
         };
+        // Any bytes can arrive here; one that isn't UTF-8 matches nothing.
         let Some(method) = object.find(method_name) else {
             return send_unless(no_reply, wr, refuse(Status::METHOD_NOT_FOUND)).await;
         };
@@ -712,6 +715,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_utf8_methods_are_not_found() {
+        let (mut broker, _server, _task) = start(example());
+        broker.accept(2).await;
+        broker
+            .send(MsgType::Invoke, 1, 0x99, |w| {
+                w.put_u32(attr::OBJID, 100);
+                w.put(attr::METHOD, b"ech\xff\0");
+                w.put(attr::DATA, &[]);
+            })
+            .await;
+        assert_eq!(broker.reply().await, (1, None, Status::METHOD_NOT_FOUND.0));
+    }
+
+    #[tokio::test]
     async fn forged_registration_replies_are_ignored() {
         let (mut broker, _server, _task) = start(example());
         broker.send(MsgType::Hello, 0, 0x1234, |_| {}).await;
@@ -772,12 +789,19 @@ mod tests {
 
     #[tokio::test]
     async fn refused_object_spares_the_others() {
+        // A refusal, and a success that never says which id it got.
+        for status in [Status::INVALID_ARGUMENT, Status::OK] {
+            refused_first_object(status).await;
+        }
+    }
+
+    async fn refused_first_object(status: Status) {
         let (mut broker, server, task) = start(example());
         broker.send(MsgType::Hello, 0, 1, |_| {}).await;
         let first = broker.recv().await;
         broker
             .send(MsgType::Status, first.seq, 0, |w| {
-                w.put_u32(attr::STATUS, Status::INVALID_ARGUMENT.0 as u32)
+                w.put_u32(attr::STATUS, status.0 as u32)
             })
             .await;
         let second = broker.recv().await;

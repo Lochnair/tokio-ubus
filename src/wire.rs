@@ -82,7 +82,8 @@ pub(crate) struct Attrs<'a> {
     pub status: Option<i32>,
     pub objid: Option<u32>,
     pub objtype: Option<u32>,
-    pub method: Option<&'a str>,
+    /// Raw bytes: ubusd passes on whatever the caller sent.
+    pub method: Option<&'a [u8]>,
     pub data: Option<&'a [u8]>,
     pub no_reply: bool,
     pub user: Option<&'a str>,
@@ -95,15 +96,16 @@ impl Message {
         for a in blob::iter(&self.body) {
             let a = a?;
             let u32_of = || <[u8; 4]>::try_from(a.data).ok().map(u32::from_be_bytes);
-            let str_of = || match a.data.split_last() {
-                Some((0, s)) => std::str::from_utf8(s).ok(),
+            let bytes_of = || match a.data.split_last() {
+                Some((0, s)) => Some(s),
                 _ => None,
             };
+            let str_of = || bytes_of().and_then(|s| std::str::from_utf8(s).ok());
             match a.id {
                 attr::STATUS => attrs.status = u32_of().map(|v| v as i32),
                 attr::OBJID => attrs.objid = u32_of(),
                 attr::OBJTYPE => attrs.objtype = u32_of(),
-                attr::METHOD => attrs.method = str_of(),
+                attr::METHOD => attrs.method = bytes_of(),
                 attr::DATA => attrs.data = Some(a.data),
                 attr::NO_REPLY => attrs.no_reply = a.data.first().is_some_and(|&b| b != 0),
                 attr::USER => attrs.user = str_of(),
@@ -261,7 +263,7 @@ mod tests {
             assert_eq!((msg.ty, msg.seq, msg.peer), (Some(MsgType::Invoke), 7, 9));
             let attrs = msg.attrs().unwrap();
             assert_eq!(attrs.objid, Some(5));
-            assert_eq!(attrs.method, Some("status"));
+            assert_eq!(attrs.method, Some(&b"status"[..]));
             assert_eq!(attrs.data, Some(&[][..]));
         }
         writer.await.unwrap();

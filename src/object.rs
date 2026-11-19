@@ -88,8 +88,8 @@ impl Object {
         self
     }
 
-    pub(crate) fn find(&self, method: &str) -> Option<&Method> {
-        self.methods.iter().find(|m| &*m.name == method)
+    pub(crate) fn find(&self, method: &[u8]) -> Option<&Method> {
+        self.methods.iter().find(|m| m.name.as_bytes() == method)
     }
 
     /// The `UBUS_ATTR_SIGNATURE` contents: a table per method, mapping each

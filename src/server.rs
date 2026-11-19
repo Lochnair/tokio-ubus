@@ -283,8 +283,12 @@ impl<'a> Session<'a> {
         W: AsyncWrite + Unpin,
     {
         match msg.ty {
+            // ubusd answers ADD_OBJECT as peer 0. Any client owning an object
+            // can send DATA or STATUS to us too, arriving with its object's
+            // id as the peer, so like libubus match the peer as well as the
+            // sequence number.
             Some(MsgType::Data | MsgType::Status)
-                if self.pending.as_ref().is_some_and(|p| p.seq == msg.seq) =>
+                if msg.peer == 0 && self.pending.as_ref().is_some_and(|p| p.seq == msg.seq) =>
             {
                 self.registration_reply(&msg, wr).await
             }
@@ -705,6 +709,43 @@ mod tests {
             assert_eq!(broker.reply().await, (seq, None, status.0), "{method}");
         }
         assert!(!task.is_finished(), "failed calls keep the connection up");
+    }
+
+    #[tokio::test]
+    async fn forged_registration_replies_are_ignored() {
+        let (mut broker, _server, _task) = start(example());
+        broker.send(MsgType::Hello, 0, 0x1234, |_| {}).await;
+        let add = broker.recv().await;
+        assert_eq!((add.ty, add.seq), (Some(MsgType::AddObject), 1));
+        // Another object's owner, relayed by ubusd with its object id as
+        // the peer, claims the registration under an id of its choosing.
+        let forger = 0xdead;
+        broker
+            .send(MsgType::Data, add.seq, forger, |w| {
+                w.put_u32(attr::OBJID, 666)
+            })
+            .await;
+        broker
+            .send(MsgType::Status, add.seq, forger, |w| {
+                w.put_u32(attr::STATUS, 0)
+            })
+            .await;
+        for (seq, id) in [(add.seq, 100), (add.seq + 1, 101)] {
+            if seq != add.seq {
+                let next = broker.recv().await;
+                assert_eq!((next.ty, next.seq), (Some(MsgType::AddObject), seq));
+            }
+            broker
+                .send(MsgType::Data, seq, 0, |w| w.put_u32(attr::OBJID, id))
+                .await;
+            broker
+                .send(MsgType::Status, seq, 0, |w| w.put_u32(attr::STATUS, 0))
+                .await;
+        }
+        broker.invoke(1, 100, "echo", &Table::new(), false).await;
+        assert_eq!(broker.reply().await.2, 0, "ubusd's id is the one kept");
+        broker.invoke(2, 666, "echo", &Table::new(), false).await;
+        assert_eq!(broker.reply().await.2, Status::NOT_FOUND.0);
     }
 
     #[tokio::test]
